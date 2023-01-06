@@ -28,8 +28,6 @@ import io.github.humbleui.skija.Surface
 import io.github.humbleui.skija.Typeface
 import io.github.humbleui.types.Point
 import io.github.humbleui.types.Rect
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.runBlocking
 import org.apache.commons.cli.DefaultParser
 import org.apache.commons.cli.HelpFormatter
 import org.apache.commons.cli.Option
@@ -38,6 +36,7 @@ import java.io.InputStream
 import java.nio.file.Path
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
+import kotlin.concurrent.thread
 import kotlin.io.path.createDirectory
 import kotlin.io.path.deleteIfExists
 import kotlin.io.path.exists
@@ -62,6 +61,9 @@ class WallClock(
 
     private val FPMS = 1_000L / fps
 
+    private var isAlive = true
+    private var imageBytes: ByteArray? = null
+
     private val input = dir.resolve("input")
     private val output = dir.resolve("live.mpd")
 
@@ -73,6 +75,7 @@ class WallClock(
         publish()
         transcode()
         draw()
+        write()
         if (maxStreamingDuration != Int.MAX_VALUE) {
             stopTranscoding()
         }
@@ -158,56 +161,68 @@ class WallClock(
     }
 
     private fun draw() {
-        // Initiate graphics
-        Surface.makeRasterN32Premul(w, h).use { surface ->
-            // Draw the background
-            drawBackground(surface.canvas)
+        thread(priority = Thread.MAX_PRIORITY) {
+            // Initiate graphics
+            Surface.makeRasterN32Premul(w, h).use { surface ->
+                // Draw the background
+                drawBackground(surface.canvas)
 
-            // Draw the gradient
-            drawGradient(surface.canvas)
+                // Draw the gradient
+                drawGradient(surface.canvas)
 
-            // Wall clock font and drawing area
-            val os = input.outputStream()
-            os.use {
+                // Wall clock font and drawing area
                 val wcbRect = createWallClackBoxRect()
                 createWallClockFont().use { font ->
                     // Fit text in wall clock area
                     val wctPoint = createWallClackTextPoint(wcbRect, font)
 
-                    val startTimestamp = System.nanoTime()
-                    while (true) {
-                        val start = System.nanoTime()
-
+                    // Keep emitting images as fast as possible
+                    while (isAlive) {
                         // Draw the wall clock
                         drawWallClockBox(surface.canvas, wcbRect)
                         drawWallClock(surface.canvas, wctPoint, font)
 
-                        // Pipe the image to
+                        // Convert the image into bytes
                         surface.makeImageSnapshot().use { image ->
                             image.encodeToData(EncodedImageFormat.JPEG)?.apply {
-                                os.write(bytes)
+                                imageBytes = bytes
                             }
-                        }
-
-                        // Should delay next frame to complaint with fps?
-                        val end = System.nanoTime()
-                        val delta = (end - start) / 1_000_000L
-                        val delay = FPMS - delta
-                        if (delay > 0) {
-                            runBlocking {
-                                delay(delay)
-                            }
-                        }
-
-                        // Should finish the streaming?
-                        val streamingDuration = (end - startTimestamp) / 1_000_000_000L
-                        if (streamingDuration > maxStreamingDuration) {
-                            break
                         }
                     }
                 }
             }
         }
+    }
+
+    private fun write() {
+        thread(priority = Thread.MAX_PRIORITY) {
+            val os = input.outputStream()
+            os.use {
+                val startTimestamp = System.nanoTime()
+                while (true) {
+                    val start = System.nanoTime()
+
+                    // Write the image to the ffmpeg pipeline
+                    imageBytes?.let { os.write(it) }
+
+                    // Should delay next frame to complaint with fps?
+                    val end = System.nanoTime()
+                    val delta = (end - start) / 1_000_000L
+                    val delay = FPMS - delta
+                    if (delay > 0) {
+                        Thread.sleep(delay)
+                    }
+
+                    // Should finish the streaming?
+                    val streamingDuration = (end - startTimestamp) / 1_000_000_000L
+                    if (streamingDuration > maxStreamingDuration) {
+                        isAlive = false
+                        break
+                    }
+                }
+            }
+        }.join()
+        isAlive = false
     }
 
     private fun drawBackground(canvas: Canvas) {
@@ -285,8 +300,6 @@ class WallClock(
         }
     }
 
-
-
     private companion object {
         private val WHITE: Int = Color.makeRGB(255, 255, 255)
         private val YELLOW: Int = Color.makeRGB(255, 255, 0)
@@ -347,7 +360,7 @@ class WallClock(
 
         private fun showHelp(options: Options, exitCode: Int, reason: Throwable? = null) {
             val order = setOf("h", "v", "vw", "vh", "fps", "msd", "p", "d")
-            val short = "[-h] [-v] [-vw=1920] [-vh=1080] [-fps=30] [-msd=-1] [-p=-1] --output-dir=<path>"
+            val short = "[-h] [-v] [-vw 1920] [-vh 1080] [-fps 30] [-msd -1] [-p -1] --output-dir=<path>"
             HelpFormatter().apply {
                 optionComparator = Comparator<Option> { o1, o2 ->
                     order.indexOf(o1.opt).compareTo(order.indexOf(o2.opt))
