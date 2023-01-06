@@ -360,7 +360,7 @@ class WallClock(
 
         private fun showHelp(options: Options, exitCode: Int, reason: Throwable? = null) {
             val order = setOf("h", "v", "vw", "vh", "fps", "msd", "p", "d")
-            val short = "[-h] [-v] [-vw 1920] [-vh 1080] [-fps 30] [-msd -1] [-p -1] --output-dir=<path>"
+            val short = "[-h] [-v] [-vw 1920] [-vh 1080] [-fps 30] [-msd -1] [-p -1] --output-dir <path>"
             HelpFormatter().apply {
                 optionComparator = Comparator<Option> { o1, o2 ->
                     order.indexOf(o1.opt).compareTo(order.indexOf(o2.opt))
